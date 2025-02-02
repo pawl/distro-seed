@@ -1,0 +1,10 @@
+---
+ssh_user: root
+public_key_path: "~/.ssh/<your key>.pub"
+seeder_user: "seeder"  # Non-root user for running the seeder
+
+linux_images:
+  - { url: "https://cdimage.debian.org/debian-cd/current/amd64/bt-cd/debian-12.9.0-amd64-netinst.iso.torrent" }
+  - { url: "https://cdimage.debian.org/debian-cd/current/arm64/bt-cd/debian-12.9.0-arm64-netinst.iso.torrent" }
+  - { url: "https://releases.ubuntu.com/24.10/ubuntu-24.10-desktop-amd64.iso.torrent" }
+  - { url: "https://releases.ubuntu.com/24.10/ubuntu-24.10-live-server-amd64.iso.torrent" }

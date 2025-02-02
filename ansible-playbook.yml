@@ -1,0 +1,145 @@
+---
+- name: Secure Ubuntu Server and Deploy Torrent Seeder
+  hosts: ubuntu_server
+  become: true
+  vars_files:
+    - vars.yml
+
+  tasks:
+    # ======= SYSTEM UPDATES =======
+    - name: Update and upgrade APT packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+        autoremove: yes
+        autoclean: yes
+
+    # ======= CREATE NON-ROOT USER =======
+    - name: Create a non-root user for running the seeder
+      user:
+        name: "{{ seeder_user }}"
+        shell: "/bin/bash"
+        createhome: yes
+
+    # ======= SSH HARDENING =======
+    - name: Ensure SSH public key is in authorized_keys
+      authorized_key:
+        user: "{{ ssh_user }}"
+        state: present
+        key: "{{ lookup('file', public_key_path) }}"
+
+    - name: Disable SSH password authentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?PasswordAuthentication"
+        line: "PasswordAuthentication no"
+        state: present
+      notify: Restart SSH
+
+    - name: Restart SSH
+      systemd:
+        name: ssh
+        state: restarted
+
+    # ======= FIREWALL SETUP =======
+    - name: Allow SSH in UFW
+      community.general.ufw:
+        rule: allow
+        name: OpenSSH
+
+    - name: Allow BitTorrent traffic (TCP)
+      community.general.ufw:
+        rule: allow
+        port: "6881"
+        proto: "tcp"
+
+    - name: Allow BitTorrent traffic (UDP)
+      community.general.ufw:
+        rule: allow
+        port: "6881"
+        proto: "udp"
+
+    - name: Enable UFW and set default deny policy
+      community.general.ufw:
+        state: enabled
+        policy: deny
+
+    - name: Restart UFW
+      systemd:
+        name: ufw
+        state: restarted
+
+    # ======= CREATE REQUIRED DIRECTORIES =======
+    - name: Ensure seeder directories exist
+      file:
+        path: "/opt/distro-seed"
+        state: directory
+        owner: "{{ seeder_user }}"
+        group: "{{ seeder_user }}"
+        mode: "0755"
+
+    # ======= GENERATE TORRENT URL ENVIRONMENT STRING =======
+    - name: Generate torrent URL list for environment variable
+      set_fact:
+        torrent_urls: "{{ linux_images | map(attribute='url') | join(',') }}"
+
+    # ======= COPY PRECOMPILED BINARY TO SERVER =======
+    - name: Copy precompiled Go binary
+      copy:
+        src: "distro-seed-linux"
+        dest: "/opt/distro-seed/distro-seed"
+        owner: "{{ seeder_user }}"
+        group: "{{ seeder_user }}"
+        mode: "0755"
+
+    # ======= CREATE SYSTEMD SERVICE FOR THE SEEDER =======
+    - name: Set up systemd service for Distro Seed
+      copy:
+        dest: "/etc/systemd/system/distro-seed.service"
+        owner: "root"
+        group: "root"
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Distro Seed - Lightweight BitTorrent Seeder
+          After=network.target
+
+          [Service]
+          User={{ seeder_user }}
+          ExecStart=/opt/distro-seed/distro-seed -dir /opt/distro-seed/downloads -url "{{ torrent_urls }}"
+          Restart=always
+          LimitNOFILE=65536
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd to recognize the new service
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable and start the Distro Seed service
+      systemd:
+        name: distro-seed
+        state: started
+        enabled: yes
+
+    # ======= VERIFY SERVICE STATUS =======
+    - name: Check Distro Seed service status
+      command: systemctl status distro-seed
+      register: seeder_status
+      changed_when: false
+
+    - name: Display Seeder Service Status
+      debug:
+        msg: "{{ seeder_status.stdout_lines }}"
+
+  handlers:
+    - name: Restart SSH
+      systemd:
+        name: ssh
+        state: restarted
+
+    - name: Restart Seeder Service
+      systemd:
+        name: distro-seed
+        state: restarted

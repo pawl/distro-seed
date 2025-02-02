@@ -1,0 +1,18 @@
+# Ignore system files
+.DS_Store
+*.swp
+*.swo
+
+# Ignore Python virtual environments
+.venv/
+
+# Ignore Ansible inventory and vars (users should copy & edit their own)
+hosts
+vars.yml
+
+# Ignore Go build artifacts
+distro-seeder
+distro-seeder-linux
+downloads/
+bin/
+build/
