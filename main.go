@@ -17,7 +17,11 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 )
 
-const seedStatsFile = "seed_stats.txt"
+const (
+	seedStatsFile  = "seed_stats.txt"
+	statusInterval = 30 * time.Second // Frequency of status logging
+	announceInterval = 10 * time.Minute // Re-announce to trackers/DHT
+)
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -30,7 +34,7 @@ func main() {
 	flag.Parse()
 
 	if *torrentURLs == "" {
-		log.Fatal("No torrent URLs provided. Set -url flag or TORRENT_URLS environment variable.")
+		log.Fatal("❌ No torrent URLs provided. Set -url flag or TORRENT_URLS environment variable.")
 	}
 
 	torrentList := parseTorrentURLs(*torrentURLs)
@@ -41,10 +45,12 @@ func main() {
 
 	processTorrents(ctx, client, torrentList, *downloadDir)
 
-	go logPeriodicTorrentStatus(ctx, client, *downloadDir)
+	// Periodic tasks
+	go logPeriodicTorrentStatus(ctx, client)
+	go periodicAnnounce(ctx, client)
 
 	<-ctx.Done()
-	log.Println("Shutting down torrent client...")
+	log.Println("🛑 Shutting down torrent client...")
 }
 
 func getEnv(key, fallback string) string {
@@ -64,7 +70,7 @@ func parseTorrentURLs(input string) []string {
 
 func ensureDirectoryExists(path string) {
 	if err := os.MkdirAll(path, 0755); err != nil {
-		log.Fatalf("Failed to create directory '%s': %v", path, err)
+		log.Fatalf("❌ Failed to create directory '%s': %v", path, err)
 	}
 }
 
@@ -72,20 +78,19 @@ func configureTorrentClient(downloadDir string) *torrent.Client {
 	cfg := torrent.NewDefaultClientConfig()
 	cfg.DataDir = downloadDir
 	cfg.Seed = true
-	cfg.NoUpload = false // Ensure maximum upload availability
+	cfg.NoUpload = false // Allow uploading
 
-	// **Optimized for maximum uploading**
-	cfg.EstablishedConnsPerTorrent = 50 // Allow many concurrent connections
-	cfg.HalfOpenConnsPerTorrent = 20    // Allow more incoming connections
-	cfg.MaxUnverifiedBytes = 4 * 1024 * 1024 // 4MB (default) to optimize disk caching
+	// **Increase Connection Limits**
+	cfg.EstablishedConnsPerTorrent = 100 // Allow more concurrent connections
+	cfg.HalfOpenConnsPerTorrent = 50    // Allow more incoming connections
 
 	// **Enable Peer Discovery**
-	cfg.NoDHT = false       // Enable DHT for finding more peers
-	cfg.DisablePEX = false  // Enable Peer Exchange (PEX)
+	cfg.NoDHT = false      // Enable DHT for decentralized peer discovery
+	cfg.DisablePEX = false // Enable Peer Exchange (PEX)
 
 	client, err := torrent.NewClient(cfg)
 	if err != nil {
-		log.Fatalf("Failed to create torrent client: %v", err)
+		log.Fatalf("❌ Failed to create torrent client: %v", err)
 	}
 	return client
 }
@@ -93,7 +98,7 @@ func configureTorrentClient(downloadDir string) *torrent.Client {
 func processTorrents(ctx context.Context, client *torrent.Client, urls []string, downloadDir string) {
 	for _, url := range urls {
 		if t, err := addTorrent(client, url, downloadDir); err != nil {
-			log.Printf("Error adding torrent from URL '%s': %v", url, err)
+			log.Printf("⚠️ Error adding torrent from URL '%s': %v", url, err)
 		} else {
 			go seedTorrent(ctx, t)
 		}
@@ -108,30 +113,30 @@ func addTorrent(client *torrent.Client, url, downloadDir string) (*torrent.Torre
 		log.Printf("📥 Downloading torrent file: %s", url)
 		resp, err := http.Get(url)
 		if err != nil {
-			return nil, fmt.Errorf("failed to download torrent: %w", err)
+			return nil, fmt.Errorf("❌ Failed to download torrent: %w", err)
 		}
 		defer resp.Body.Close()
 
 		out, err := os.Create(torrentPath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create torrent file: %w", err)
+			return nil, fmt.Errorf("❌ Failed to create torrent file: %w", err)
 		}
 		defer out.Close()
 
 		if _, err = out.ReadFrom(resp.Body); err != nil {
-			return nil, fmt.Errorf("failed to save torrent file: %w", err)
+			return nil, fmt.Errorf("❌ Failed to save torrent file: %w", err)
 		}
 		log.Printf("✅ Torrent file saved: %s", torrentPath)
 	}
 
 	meta, err := metainfo.LoadFromFile(torrentPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load torrent metadata: %w", err)
+		return nil, fmt.Errorf("❌ Failed to load torrent metadata: %w", err)
 	}
 
 	t, err := client.AddTorrent(meta)
 	if err != nil {
-		return nil, fmt.Errorf("failed to add torrent: %w", err)
+		return nil, fmt.Errorf("❌ Failed to add torrent: %w", err)
 	}
 
 	return t, nil
@@ -139,14 +144,16 @@ func addTorrent(client *torrent.Client, url, downloadDir string) (*torrent.Torre
 
 func seedTorrent(ctx context.Context, t *torrent.Torrent) {
 	<-t.GotInfo() // Wait for metadata before proceeding
-	t.DownloadAll() // Download all pieces first, then start seeding
-	log.Printf("🌱 Now seeding: %s (Size: %d MB)", t.Name(), t.Length()/1024/1024)
+	t.DownloadAll() // Ensure we have the entire file before seeding
+	log.Printf("🌱 Seeding: %s (Size: %d MB)", t.Name(), t.Length()/1024/1024)
 
-	<-ctx.Done() // Keep seeding until termination signal is received
+	// Keep running until termination signal
+	<-ctx.Done()
 }
 
-func logPeriodicTorrentStatus(ctx context.Context, client *torrent.Client, downloadDir string) {
-	ticker := time.NewTicker(30 * time.Second)
+// Periodic torrent status logging
+func logPeriodicTorrentStatus(ctx context.Context, client *torrent.Client) {
+	ticker := time.NewTicker(statusInterval)
 	defer ticker.Stop()
 
 	for {
@@ -154,25 +161,68 @@ func logPeriodicTorrentStatus(ctx context.Context, client *torrent.Client, downl
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			logCurrentTorrentStatus(client, downloadDir)
+			logCurrentTorrentStatus(client)
 		}
 	}
 }
 
-func logCurrentTorrentStatus(client *torrent.Client, downloadDir string) {
+// Log per-torrent upload metrics
+func logCurrentTorrentStatus(client *torrent.Client) {
 	var totalUploaded int64
 	for _, t := range client.Torrents() {
 		stats := t.Stats()
-		totalUploaded += stats.ConnStats.BytesWrittenData.Int64()
+		uploaded := stats.ConnStats.BytesWrittenData.Int64()
+		totalUploaded += uploaded
+
+		// Log per-torrent stats
+		log.Printf("➡️ %s - %d peers - Uploaded: %.2f MB",
+			t.Name(), len(t.PeerConns()), float64(uploaded)/1024/1024)
 	}
+
+	// Log total upload stats
 	log.Printf("📊 Total uploaded: %.2f MB", float64(totalUploaded)/1024/1024)
 }
 
+// Periodically re-announce to DHT and trackers
+func periodicAnnounce(ctx context.Context, client *torrent.Client) {
+	ticker := time.NewTicker(15 * time.Minute) // Announce every 15 minutes
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			log.Println("🔄 Re-announcing torrents to trackers and DHT...")
+
+			for _, t := range client.Torrents() {
+				if t.Stats().TotalPeers < 10 { // Only re-announce if we have few peers
+					log.Printf("🔄 Re-announcing: %s", t.Name())
+
+					// Re-announce to all trackers
+					for _, tracker := range t.Metainfo().AnnounceList {
+						t.ModifyTrackers([][]string{tracker})
+					}
+
+					// Re-announce to DHT
+					var infoHash [20]byte
+					copy(infoHash[:], t.InfoHash().Bytes())
+					for _, dhtServer := range client.DhtServers() {
+						dhtServer.Announce(infoHash, client.LocalPort(), true)
+					}
+				}
+			}
+		}
+	}
+}
+
+// Handle SIGINT and SIGTERM for graceful shutdown
 func setupSignalHandling(cancelFunc context.CancelFunc) {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-signals
+		log.Println("🛑 Received shutdown signal...")
 		cancelFunc()
 	}()
 }
