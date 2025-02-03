@@ -11,8 +11,8 @@ hosts
 vars.yml
 
 # Ignore Go build artifacts
-distro-seeder
-distro-seeder-linux
+distro-seed
+distro-seed-linux
 downloads/
 bin/
 build/
