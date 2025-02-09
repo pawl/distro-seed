@@ -201,36 +201,49 @@ func logPeriodicTorrentStatus(ctx context.Context, client *torrent.Client, seedS
 	ticker := time.NewTicker(statusInterval)
 	defer ticker.Stop()
 
+	// Track the previously recorded total uploaded for each torrent
+	previousUploads := make(map[string]int64)
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			logCurrentTorrentStatus(client, seedStatsFile, totalUploaded)
+			logCurrentTorrentStatus(client, seedStatsFile, totalUploaded, previousUploads)
 		}
 	}
 }
 
-func logCurrentTorrentStatus(client *torrent.Client, seedStatsFile string, totalUploaded *int64) {
+func logCurrentTorrentStatus(client *torrent.Client, seedStatsFile string, totalUploaded *int64, previousUploads map[string]int64) {
 	var sessionUpload int64
 
 	for _, t := range client.Torrents() {
 		stats := t.Stats()
 		uploaded := stats.ConnStats.BytesWrittenData.Int64()
-		sessionUpload += uploaded
 
-		// Log per-torrent stats
-		log.Printf("➡️ %s - %d peers - Uploaded: %.2f MB",
+		// Get the previously recorded upload for this torrent
+		prevUploaded := previousUploads[t.InfoHash().HexString()]
+
+		// Calculate the total uploaded for this session
+		increment := uploaded - prevUploaded
+
+		// Update the map with the latest upload value for this torrent
+		previousUploads[t.InfoHash().HexString()] = uploaded
+
+		// Add the increment to the session's total upload
+		sessionUpload += increment
+
+		// Log per-torrent stats (total uploaded since program started)
+		log.Printf("➡️ %s - %d peers - Total Uploaded: %.2f MB",
 			t.Name(), len(t.PeerConns()), float64(uploaded)/1024/1024)
 	}
 
-	// Calculate increment and update the grand total
-	increment := sessionUpload
-	*totalUploaded += increment
+	// Update the grand total uploaded with the session's upload
+	*totalUploaded += sessionUpload
 
-	log.Printf("📊 Total uploaded: %.2f MB", float64(*totalUploaded)/1024/1024)
+	log.Printf("📊 Total uploaded: %.2f MB (all runs)", float64(*totalUploaded)/1024/1024)
 
-	// Write the updated total uploaded to file
+	// Write the updated total uploaded to the stats file
 	file, err := os.Create(seedStatsFile)
 	if err != nil {
 		log.Printf("Error: Could not open seed stats file for writing: %v", err)
