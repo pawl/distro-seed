@@ -91,7 +91,7 @@
         owner: "{{ seeder_user }}"
         group: "{{ seeder_user }}"
         mode: "0755"
-      notify: Restart Seeder Service  # Ensure restart happens only if the binary is updated
+      notify: Restart Seeder Service
 
     # ======= CREATE SYSTEMD SERVICE FOR THE SEEDER =======
     - name: Set up systemd service for Distro Seed
@@ -109,19 +109,21 @@
           User={{ seeder_user }}
           ExecStart=/opt/distro-seed/distro-seed -dir /opt/distro-seed/downloads -url "{{ torrent_urls }}"
           Restart=always
-          RestartSec=5  # Ensure service restarts after failure
+          # Ensure service restarts after failure
+          RestartSec=5
           StartLimitInterval=60
           StartLimitBurst=3
           LimitNOFILE=65536
 
           [Install]
           WantedBy=multi-user.target
+      notify: Restart Seeder Service
 
     - name: Reload systemd to recognize the new service
       systemd:
         daemon_reload: yes
 
-    - name: Enable and start the Distro Seed service
+    - name: Enable Distro Seed service
       systemd:
         name: distro-seed
         state: started
