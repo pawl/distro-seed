@@ -48,11 +48,14 @@ func main() {
 	client := configureTorrentClient(*downloadDir)
 	defer client.Close()
 
-	processTorrents(ctx, client, torrentList, *downloadDir)
+	// Initialize the grand total uploaded amount from the stats file
+	totalUploaded := readTotalUploaded(seedStatsFile)
 
 	// Periodic tasks
-	go logPeriodicTorrentStatus(ctx, client, seedStatsFile)
+	go logPeriodicTorrentStatus(ctx, client, seedStatsFile, &totalUploaded)
 	go periodicAnnounce(ctx, client)
+
+	processTorrents(ctx, client, torrentList, *downloadDir)
 
 	<-ctx.Done()
 	log.Println("🛑 Shutting down torrent client...")
@@ -110,9 +113,7 @@ func processTorrents(ctx context.Context, client *torrent.Client, urls []string,
 				log.Printf("⚠️ Error adding magnet URL '%s': %v", url, err)
 				continue
 			}
-			<-t.GotInfo() // Wait for metadata
-			log.Printf("✅ Magnet link added: %s", t.Name())
-			go seedTorrent(ctx, t)
+			go waitForMagnetMetadata(ctx, t)
 		} else {
 			// Handle regular torrent file URLs
 			if t, err := addTorrent(client, url, downloadDir); err != nil {
@@ -122,6 +123,13 @@ func processTorrents(ctx context.Context, client *torrent.Client, urls []string,
 			}
 		}
 	}
+}
+
+func waitForMagnetMetadata(ctx context.Context, t *torrent.Torrent) {
+	log.Printf("⏳ Waiting for metadata: %s", t.InfoHash().HexString())
+	<-t.GotInfo() // Wait for metadata
+	log.Printf("✅ Metadata retrieved: %s", t.Name())
+	go seedTorrent(ctx, t)
 }
 
 func addTorrent(client *torrent.Client, url, downloadDir string) (*torrent.Torrent, error) {
@@ -171,7 +179,6 @@ func seedTorrent(ctx context.Context, t *torrent.Torrent) {
 	<-ctx.Done()
 }
 
-// Read total uploaded amount from file
 func readTotalUploaded(seedStatsFile string) int64 {
 	file, err := os.Open(seedStatsFile)
 	if err != nil {
@@ -190,8 +197,7 @@ func readTotalUploaded(seedStatsFile string) int64 {
 	return totalUploaded
 }
 
-// Periodic torrent status logging
-func logPeriodicTorrentStatus(ctx context.Context, client *torrent.Client, seedStatsFile string) {
+func logPeriodicTorrentStatus(ctx context.Context, client *torrent.Client, seedStatsFile string, totalUploaded *int64) {
 	ticker := time.NewTicker(statusInterval)
 	defer ticker.Stop()
 
@@ -200,26 +206,29 @@ func logPeriodicTorrentStatus(ctx context.Context, client *torrent.Client, seedS
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			logCurrentTorrentStatus(client, seedStatsFile)
+			logCurrentTorrentStatus(client, seedStatsFile, totalUploaded)
 		}
 	}
 }
 
-// Log per-torrent upload metrics
-func logCurrentTorrentStatus(client *torrent.Client, seedStatsFile string) {
-	totalUploaded := readTotalUploaded(seedStatsFile)
+func logCurrentTorrentStatus(client *torrent.Client, seedStatsFile string, totalUploaded *int64) {
+	var sessionUpload int64
+
 	for _, t := range client.Torrents() {
 		stats := t.Stats()
 		uploaded := stats.ConnStats.BytesWrittenData.Int64()
-		totalUploaded += uploaded
+		sessionUpload += uploaded
 
 		// Log per-torrent stats
 		log.Printf("➡️ %s - %d peers - Uploaded: %.2f MB",
 			t.Name(), len(t.PeerConns()), float64(uploaded)/1024/1024)
 	}
 
-	// Log total upload stats
-	log.Printf("📊 Total uploaded: %.2f MB", float64(totalUploaded)/1024/1024)
+	// Calculate increment and update the grand total
+	increment := sessionUpload
+	*totalUploaded += increment
+
+	log.Printf("📊 Total uploaded: %.2f MB", float64(*totalUploaded)/1024/1024)
 
 	// Write the updated total uploaded to file
 	file, err := os.Create(seedStatsFile)
@@ -229,7 +238,7 @@ func logCurrentTorrentStatus(client *torrent.Client, seedStatsFile string) {
 	}
 	defer file.Close()
 
-	_, err = fmt.Fprintf(file, "%d", totalUploaded)
+	_, err = fmt.Fprintf(file, "%d", *totalUploaded)
 	if err != nil {
 		log.Printf("Error: Failed to write total uploaded to file: %v", err)
 	}
