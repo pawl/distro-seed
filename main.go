@@ -18,8 +18,7 @@ import (
 )
 
 const (
-	seedStatsFile  = "seed_stats.txt"
-	statusInterval = 30 * time.Second // Frequency of status logging
+	statusInterval   = 30 * time.Second // Frequency of status logging
 	announceInterval = 10 * time.Minute // Re-announce to trackers/DHT
 )
 
@@ -32,6 +31,9 @@ func main() {
 	downloadDir := flag.String("dir", getEnv("DOWNLOAD_DIR", "./downloads"), "Directory to store downloaded files")
 	torrentURLs := flag.String("url", getEnv("TORRENT_URLS", ""), "Comma-separated list of torrent URLs")
 	flag.Parse()
+
+	// Set the path for seedStatsFile dynamically based on downloadDir
+	seedStatsFile := filepath.Join(*downloadDir, "seed_stats.txt")
 
 	if *torrentURLs == "" {
 		log.Fatal("❌ No torrent URLs provided. Set -url flag or TORRENT_URLS environment variable.")
@@ -46,7 +48,7 @@ func main() {
 	processTorrents(ctx, client, torrentList, *downloadDir)
 
 	// Periodic tasks
-	go logPeriodicTorrentStatus(ctx, client)
+	go logPeriodicTorrentStatus(ctx, client, seedStatsFile)
 	go periodicAnnounce(ctx, client)
 
 	<-ctx.Done()
@@ -82,7 +84,7 @@ func configureTorrentClient(downloadDir string) *torrent.Client {
 
 	// **Increase Connection Limits**
 	cfg.EstablishedConnsPerTorrent = 100 // Allow more concurrent connections
-	cfg.HalfOpenConnsPerTorrent = 50    // Allow more incoming connections
+	cfg.HalfOpenConnsPerTorrent = 50     // Allow more incoming connections
 
 	// **Enable Peer Discovery**
 	cfg.NoDHT = false      // Enable DHT for decentralized peer discovery
@@ -143,7 +145,7 @@ func addTorrent(client *torrent.Client, url, downloadDir string) (*torrent.Torre
 }
 
 func seedTorrent(ctx context.Context, t *torrent.Torrent) {
-	<-t.GotInfo() // Wait for metadata before proceeding
+	<-t.GotInfo()   // Wait for metadata before proceeding
 	t.DownloadAll() // Ensure we have the entire file before seeding
 	log.Printf("🌱 Seeding: %s (Size: %d MB)", t.Name(), t.Length()/1024/1024)
 
@@ -151,8 +153,27 @@ func seedTorrent(ctx context.Context, t *torrent.Torrent) {
 	<-ctx.Done()
 }
 
+// Read total uploaded amount from file
+func readTotalUploaded(seedStatsFile string) int64 {
+	file, err := os.Open(seedStatsFile)
+	if err != nil {
+		log.Printf("Warning: Could not open seed stats file for reading: %v", err)
+		return 0
+	}
+	defer file.Close()
+
+	var totalUploaded int64
+	_, err = fmt.Fscanf(file, "%d", &totalUploaded)
+	if err != nil {
+		log.Printf("Warning: Failed to read total uploaded from file: %v", err)
+		return 0
+	}
+
+	return totalUploaded
+}
+
 // Periodic torrent status logging
-func logPeriodicTorrentStatus(ctx context.Context, client *torrent.Client) {
+func logPeriodicTorrentStatus(ctx context.Context, client *torrent.Client, seedStatsFile string) {
 	ticker := time.NewTicker(statusInterval)
 	defer ticker.Stop()
 
@@ -161,14 +182,14 @@ func logPeriodicTorrentStatus(ctx context.Context, client *torrent.Client) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			logCurrentTorrentStatus(client)
+			logCurrentTorrentStatus(client, seedStatsFile)
 		}
 	}
 }
 
 // Log per-torrent upload metrics
-func logCurrentTorrentStatus(client *torrent.Client) {
-	var totalUploaded int64
+func logCurrentTorrentStatus(client *torrent.Client, seedStatsFile string) {
+	totalUploaded := readTotalUploaded(seedStatsFile)
 	for _, t := range client.Torrents() {
 		stats := t.Stats()
 		uploaded := stats.ConnStats.BytesWrittenData.Int64()
@@ -181,6 +202,19 @@ func logCurrentTorrentStatus(client *torrent.Client) {
 
 	// Log total upload stats
 	log.Printf("📊 Total uploaded: %.2f MB", float64(totalUploaded)/1024/1024)
+
+	// Write the updated total uploaded to file
+	file, err := os.Create(seedStatsFile)
+	if err != nil {
+		log.Printf("Error: Could not open seed stats file for writing: %v", err)
+		return
+	}
+	defer file.Close()
+
+	_, err = fmt.Fprintf(file, "%d", totalUploaded)
+	if err != nil {
+		log.Printf("Error: Failed to write total uploaded to file: %v", err)
+	}
 }
 
 // Periodically re-announce to DHT and trackers
