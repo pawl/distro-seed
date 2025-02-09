@@ -29,14 +29,14 @@ func main() {
 	setupSignalHandling(cancel)
 
 	downloadDir := flag.String("dir", getEnv("DOWNLOAD_DIR", "./downloads"), "Directory to store downloaded files")
-	torrentURLs := flag.String("url", getEnv("TORRENT_URLS", ""), "Comma-separated list of torrent URLs")
+	torrentURLs := flag.String("url", getEnv("TORRENT_URLS", ""), "Comma-separated list of torrent URLs or magnet links")
 	flag.Parse()
 
 	// Set the path for seedStatsFile dynamically based on downloadDir
 	seedStatsFile := filepath.Join(*downloadDir, "seed_stats.txt")
 
 	if *torrentURLs == "" {
-		log.Fatal("❌ No torrent URLs provided. Set -url flag or TORRENT_URLS environment variable.")
+		log.Fatal("❌ No torrent URLs or magnet links provided. Set -url flag or TORRENT_URLS environment variable.")
 	}
 
 	torrentList := parseTorrentURLs(*torrentURLs)
@@ -99,15 +99,30 @@ func configureTorrentClient(downloadDir string) *torrent.Client {
 
 func processTorrents(ctx context.Context, client *torrent.Client, urls []string, downloadDir string) {
 	for _, url := range urls {
-		if t, err := addTorrent(client, url, downloadDir); err != nil {
-			log.Printf("⚠️ Error adding torrent from URL '%s': %v", url, err)
-		} else {
+		if strings.HasPrefix(url, "magnet:?") {
+			// Handle magnet URLs
+			log.Printf("📥 Adding magnet URL: %s", url)
+			t, err := client.AddMagnet(url)
+			if err != nil {
+				log.Printf("⚠️ Error adding magnet URL '%s': %v", url, err)
+				continue
+			}
+			<-t.GotInfo() // Wait for metadata
+			log.Printf("✅ Magnet link added: %s", t.Name())
 			go seedTorrent(ctx, t)
+		} else {
+			// Handle regular torrent file URLs
+			if t, err := addTorrent(client, url, downloadDir); err != nil {
+				log.Printf("⚠️ Error adding torrent from URL '%s': %v", url, err)
+			} else {
+				go seedTorrent(ctx, t)
+			}
 		}
 	}
 }
 
 func addTorrent(client *torrent.Client, url, downloadDir string) (*torrent.Torrent, error) {
+	// Handle regular torrent file URLs
 	torrentPath := filepath.Join(downloadDir, filepath.Base(url))
 
 	// Download torrent file if it doesn't exist
