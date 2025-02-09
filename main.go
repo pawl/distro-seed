@@ -23,6 +23,9 @@ const (
 )
 
 func main() {
+	// Disable the default timestamp in log package to avoid duplicate dates
+	log.SetFlags(0)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
